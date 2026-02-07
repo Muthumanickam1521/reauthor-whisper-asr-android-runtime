@@ -1,0 +1,8 @@
+/android-dev
+
+*.onnx
+
+# Ignore all files in the android-dev directory
+/android-dev/*
+
+*.data
