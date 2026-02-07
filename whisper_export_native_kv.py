@@ -1,3 +1,4 @@
+from json import decoder
 from pyexpat import model
 import torch
 import whisper
@@ -9,33 +10,25 @@ OPSET = 17
 whisper.model.MultiHeadAttention.use_sdpa = False
 
 class OnnxDecoder(torch.nn.Module):
-
-    def __init__(self, model):
+    def __init__(self, decoder):
         super().__init__()
-        self.decoder = model.decoder
+        self.decoder = decoder
 
-        self.kv_cache, self.hooks = model.install_kv_cache_hooks()
-
-        self.kv_modules = (
-            [block.attn.key for block in self.decoder.blocks] +
-            [block.attn.value for block in self.decoder.blocks]
-        )
-
-        self.initial_token_length = 2  # sot + notimestamps
+        self.key_modules = [block.attn.key for block in decoder.blocks]
+        self.value_modules = [block.attn.value for block in decoder.blocks]
+        self.kv_modules = self.key_modules + self.value_modules
 
     def forward(self, tokens, audio, cache):
 
-        # restore cache
-        for m, c in zip(self.kv_modules, cache):
-            self.kv_cache[m] = c
+        kv_cache = dict(zip(self.kv_modules, cache))
 
-        # native Whisper behavior
-        if tokens.shape[-1] > self.initial_token_length:
+        # native Whisper logic
+        if tokens.shape[1] > 1:
             tokens = tokens[:, -1:]
 
-        logits = self.decoder(tokens, audio, kv_cache=self.kv_cache)
+        logits = self.decoder(tokens, audio, kv_cache=kv_cache)
 
-        new_cache = torch.stack([self.kv_cache[m] for m in self.kv_modules])
+        new_cache = torch.stack([kv_cache[m] for m in self.kv_modules])
 
         return logits, new_cache
 
@@ -45,15 +38,12 @@ def export():
     model = whisper.load_model("tiny.en").cpu().eval()
 
     encoder = model.encoder
-    decoder = OnnxDecoder(model)
+    decoder = OnnxDecoder(model.decoder)
 
     mel = torch.randn(1, 80, 3000)
     audio = encoder(mel)
 
-    cache = torch.zeros(
-        (len(decoder.kv_modules), 1, 0, model.dims.n_text_state)
-    )
-
+    cache = torch.zeros((len(decoder.kv_modules), 1, 1, 384))
     tokenizer = whisper.tokenizer.get_tokenizer(multilingual=False)
     tokens = torch.tensor([[tokenizer.sot, tokenizer.no_timestamps]])
 
@@ -78,14 +68,15 @@ def export():
         decoder,
         (tokens, audio, cache),
         "decoder.onnx",
-        input_names=["tokens", "audio", "cache"],
-        output_names=["logits", "new_cache"],
+        input_names=["tokens","audio","cache"],
+        output_names=["logits","new_cache"],
         dynamic_axes={
-            "tokens": {0: "batch", 1: "seq"},
-            "audio": {0: "batch", 1: "time"},   # DO NOT mark dim 2 dynamic
-            "cache": {0: "layer", 1: "batch", 2: "cached_seq"},
-            "new_cache": {0: "layer", 1: "batch", 2: "cached_seq"},
+            "tokens": {0:"batch", 1:"seq"},
+            "audio": {0:"batch", 1:"time"},
+            "cache": {1:"batch", 2:"cached_seq"},        # removed dim 0
+            "new_cache": {1:"batch", 2:"cached_seq"},    # removed dim 0
         },
+
         opset_version=17,
     )
 
