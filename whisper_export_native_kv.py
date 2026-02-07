@@ -10,6 +10,7 @@ OPSET = 17
 whisper.model.MultiHeadAttention.use_sdpa = False
 
 class OnnxDecoder(torch.nn.Module):
+
     def __init__(self, decoder):
         super().__init__()
         self.decoder = decoder
@@ -22,15 +23,32 @@ class OnnxDecoder(torch.nn.Module):
 
         kv_cache = dict(zip(self.kv_modules, cache))
 
-        # native Whisper logic
-        if tokens.shape[1] > 1:
-            tokens = tokens[:, -1:]
+        # compute offset explicitly
+        offset = cache.shape[2]
 
-        logits = self.decoder(tokens, audio, kv_cache=kv_cache)
+        # embedding
+        x = self.decoder.token_embedding(tokens)
+
+        # apply correct positional embedding slice
+        pos = self.decoder.positional_embedding[offset:offset + tokens.shape[1]]
+        x = x + pos
+
+        x = x.to(audio.dtype)
+
+        mask = self.decoder.mask[offset:offset + tokens.shape[1],
+                                :offset + tokens.shape[1]]
+
+        for block in self.decoder.blocks:
+            x = block(x, audio, mask=mask, kv_cache=kv_cache)
+
+        x = self.decoder.ln(x)
+
+        logits = x @ self.decoder.token_embedding.weight.T
 
         new_cache = torch.stack([kv_cache[m] for m in self.kv_modules])
 
         return logits, new_cache
+
 
 
 def export():
