@@ -1,8 +1,14 @@
 /android-dev
 
-*.onnx
+*.onnx 
+*.pdf
 
+*.onnx
 # Ignore all files in the android-dev directory
 /android-dev/*
 
 *.data
+
+sample.mp3
+
+*.mp3
